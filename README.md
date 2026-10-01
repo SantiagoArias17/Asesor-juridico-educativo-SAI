@@ -93,6 +93,24 @@ git push
 
 Streamlit Cloud redespliega automáticamente al detectar el push — no necesitas hacer nada más.
 
+## 6. Actualizar el Índice Maestro de Vigencia
+
+`vigencia_index.json` es el control de vigencia (VIGENTE/DEROGADA/REFORMADA, jerarquía, relación
+con otras normas) auditado a partir de `INDICE_MAESTRO_VIGENCIA_ASESOR_JURIDICO_AUDITADO_*.xlsx`.
+Cuando actualices ese Excel (nueva auditoría, normas reclasificadas), regenera este archivo desde
+el proyecto principal y vuelve a copiarlo aquí:
+
+```bash
+copy ..\graphify-out\vigencia_index.json .\vigencia_index.json
+git add vigencia_index.json
+git commit -m "Actualizar indice de vigencia"
+git push
+```
+
+Las correcciones de auditoría más importantes (sentencias mal clasificadas, precedentes
+superados, etc.) están además incrustadas directamente en el prompt del asistente (Sección 31 de
+`streamlit_app.py`) — si cambian, hay que editar esa sección a mano.
+
 ## Límites de esta v1
 
 - **Sin historial persistente**: la conversación se guarda solo mientras la pestaña del navegador

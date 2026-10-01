@@ -16,6 +16,7 @@ st.set_page_config(
 )
 
 GRAPH_PATH = Path(__file__).parent / "graph.json"
+VIGENCIA_PATH = Path(__file__).parent / "vigencia_index.json"
 MODEL = st.secrets.get("ANTHROPIC_MODEL", "claude-sonnet-5")
 MAX_QUESTIONS_PER_SESSION = int(st.secrets.get("MAX_QUESTIONS_PER_SESSION", 30))
 
@@ -45,10 +46,17 @@ sobre tus capacidades:
 - NO existe función para que el usuario adjunte archivos todavía. Si
   describe un documento en texto, trátalo según la Sección 10 (hecho
   indicado por el usuario, no hecho documentado verificado).
-- El Índice Maestro de Control de Vigencia no está integrado en el
-  grafo todavía. Haz control de vigencia (Sección 4) solo con lo que
-  cada norma indica de sí misma en el contexto entregado; si no es
-  claro, repórtalo como "ESTADO NO DETERMINADO" en vez de asumir vigencia.
+- El Índice Maestro de Control de Vigencia SÍ está integrado: cuando el
+  contexto incluya un bloque "ESTADO DE VIGENCIA (Índice Maestro
+  oficial", ese es tu control de vigencia autoritativo y auditado para
+  esos documentos — úsalo directamente para clasificar VIGENTE/VIGENTE
+  REFORMADA/DEROGADA/INSTRUMENTO TÉCNICO en vez de inferirlo tú del
+  resto del contexto. Si un documento citado en tu respuesta NO aparece
+  en ese bloque, no tienes su estado de vigencia auditado — repórtalo
+  como "ESTADO NO DETERMINADO" en vez de asumir vigencia. Las
+  correcciones globales de auditoría del corpus (Sección 31) aplican
+  siempre, independientemente de qué aparezca en el contexto de esta
+  pregunta.
 - NUNCA escribas rutas de archivo, nombres de carpetas, extensiones
   .pdf/.jpg, ni el texto literal "src=" en tu respuesta — son datos
   técnicos internos. Cita cada fuente SOLO por su nombre legible (ej.
@@ -863,6 +871,57 @@ Antes de entregar una respuesta jurídica importante verifica:
 
 Si alguna respuesta negativa puede afectar sustancialmente la conclusión,
 corrige el análisis antes de responder.
+
+==================================================
+31. AUDITORÍA Y CONTROL DE VIGENCIA DEL CORPUS (corte 2026-08-16)
+==================================================
+
+Estas correcciones vienen de una auditoría manual del Índice Maestro y
+tienen prioridad sobre cualquier lectura literal de los documentos
+individuales. Aplícalas SIEMPRE que la consulta las involucre, sin
+importar qué apareció en el contexto de esta pregunta en particular:
+
+- La Sentencia 668-22-EP/26 (archivo "Sentencia 668-22-EP-26.pdf") está
+  MAL CLASIFICADA en el corpus: ese PDF es en realidad la Edición
+  Constitucional 234 del Registro Oficial, cuyo contenido principal
+  trata materia migratoria/unidad familiar. La sentencia docente
+  relevante sobre procedimientos disciplinarios está incluida DENTRO de
+  ese mismo PDF desde la página 34 y es la Sentencia 851-25-EP/26 — cita
+  siempre 851-25-EP/26, nunca 668-22-EP/26, para casos disciplinarios
+  docentes.
+- La Sentencia 376-20-JP/21 es solo un ANTECEDENTE SUPERADO: la
+  Sentencia 3420-22-JP/26 abandonó expresamente su precedente relevante.
+  No la presentes como jurisprudencia vigente aplicable; menciónala
+  únicamente para explicar la evolución del criterio.
+- La Sentencia 99-22-IN/26 (a veces referenciada como "99-22-26") es
+  PRIORITARIA y aplica al Código del Trabajo y a la LOSEP: un acto grave
+  único puede configurar violencia/acoso laboral (actualiza la
+  interpretación tradicional que exigía reiteración de conductas).
+- El documento "LEY ORGÁNICA DE PROMOCIÓN..." debe clasificarse como Ley
+  Orgánica de Promoción, Prevención y Atención Psicosocial para Niñas,
+  Niños y Adolescentes (RO 305, 15-06-2026) — NO es una reforma del
+  Código de la Niñez y Adolescencia, aunque esté archivada junto a él.
+- El PDF del Código de la Niñez y Adolescencia en el corpus es una
+  versión base antigua: no lo trates como el texto consolidado 2026;
+  si vas a citar un artículo específico, advierte que podría tener
+  reformas posteriores no reflejadas en ese PDF.
+- Los Acuerdos Ministeriales MDT-2025-093 (sector público) y
+  MDT-2025-102 (sector privado, reformado por MDT-2025-186) deben
+  leerse en conjunto cuando la consulta sea sobre acoso/violencia
+  laboral — no son intercambiables, dependen del régimen del consultante
+  (ver Sección 6).
+- El Reglamento General a la LOEI tiene dos versiones muy similares (D.E.
+  675/2023 y el PDF "reglamento-general-a-la-ley-organica-de-educacion-
+  intercultural.pdf") más las reformas D.E. 950/2023 y D.E. 71/2025 — no
+  los cites como si fueran documentos distintos con contenido diferente.
+
+Reglas generales de uso del corpus (del Índice Maestro):
+
+1. No asumir vigencia de una norma solo por el año del documento.
+2. Priorizar Constitución, ley, reglamento y norma especial vigente
+   sobre guías o protocolos (ver también Sección 5, Jerarquía).
+3. Antes de citar una norma reformada, comprobar la reforma y el texto
+   aplicable a la fecha del caso del usuario.
 """
 
 SOURCE_RE = re.compile(r"src=([^\s\]]+)")
@@ -891,6 +950,15 @@ def load_graph() -> nx.Graph:
 
 
 @st.cache_resource(show_spinner=False)
+def load_vigencia() -> dict:
+    """documento (source_file relativo) -> metadata de vigencia auditada, o {} si no existe el archivo."""
+    if not VIGENCIA_PATH.exists():
+        return {}
+    data = json.loads(VIGENCIA_PATH.read_text(encoding="utf-8"))
+    return data.get("documentos", {})
+
+
+@st.cache_resource(show_spinner=False)
 def get_client() -> anthropic.Anthropic:
     api_key = st.secrets.get("ANTHROPIC_API_KEY")
     if not api_key:
@@ -906,7 +974,44 @@ def extract_sources(context_text: str) -> list[str]:
     return sorted({m for m in SOURCE_RE.findall(context_text) if m and m != "None"})
 
 
-def answer_question(question: str, G: nx.Graph, client: anthropic.Anthropic) -> tuple[str, list[str]]:
+def build_vigencia_block(sources: list[str], vigencia: dict) -> str:
+    """Builds the authoritative vigencia block for the documents actually retrieved this query."""
+    if not vigencia or not sources:
+        return ""
+
+    lower_map = {k.lower(): (k, v) for k, v in vigencia.items()}
+    lines = []
+    for src in sources:
+        hit = vigencia.get(src) or lower_map.get(src.lower(), (None, None))[1]
+        if not hit:
+            continue
+        nombre = src.rsplit("/", 1)[-1]
+        parts = [f'- "{nombre}": ESTADO = {hit.get("estado") or "NO DETERMINADO"}']
+        if hit.get("jerarquia"):
+            parts.append(f'jerarquía {hit["jerarquia"]} (1=mayor)')
+        if hit.get("prioridad_corpus"):
+            parts.append(f'prioridad {hit["prioridad_corpus"]}')
+        line = ", ".join(parts)
+        if hit.get("relacion"):
+            line += f'. Relación/reforma: {hit["relacion"]}'
+        if hit.get("observaciones"):
+            line += f'. Observación auditada: {hit["observaciones"]}'
+        if hit.get("fuente_oficial"):
+            line += f'. Verificar en: {hit["fuente_oficial"]}'
+        lines.append(line)
+
+    if not lines:
+        return ""
+
+    return (
+        "\n\nESTADO DE VIGENCIA (Índice Maestro oficial, corte "
+        + "2026-08-16" + "):\n" + "\n".join(lines)
+    )
+
+
+def answer_question(
+    question: str, G: nx.Graph, client: anthropic.Anthropic, vigencia: dict
+) -> tuple[str, list[str]]:
     context = _query_graph_text(
         G, question, mode="bfs", depth=2, token_budget=3500, graph_path=str(GRAPH_PATH)
     )
@@ -918,6 +1023,9 @@ def answer_question(question: str, G: nx.Graph, client: anthropic.Anthropic) -> 
             "⚠️ Esta es información orientativa, no asesoría legal vinculante.",
             [],
         )
+
+    sources = extract_sources(context)
+    vigencia_block = build_vigencia_block(sources, vigencia)
 
     try:
         message = client.messages.create(
@@ -934,7 +1042,8 @@ def answer_question(question: str, G: nx.Graph, client: anthropic.Anthropic) -> 
                 {
                     "role": "user",
                     "content": (
-                        f"CONTEXTO DEL GRAFO JURÍDICO (fuentes verificadas):\n{context}\n\n"
+                        f"CONTEXTO DEL GRAFO JURÍDICO (fuentes verificadas):\n{context}"
+                        f"{vigencia_block}\n\n"
                         f"PREGUNTA DEL USUARIO:\n{question}"
                     ),
                 }
@@ -946,7 +1055,7 @@ def answer_question(question: str, G: nx.Graph, client: anthropic.Anthropic) -> 
         return "⚠️ El servicio no está disponible en este momento. Intenta de nuevo en unos minutos.", []
 
     answer_text = "".join(block.text for block in message.content if block.type == "text")
-    return answer_text, extract_sources(context)
+    return answer_text, sources
 
 
 # ---------- UI ----------
@@ -966,6 +1075,7 @@ if "question_count" not in st.session_state:
 
 G = load_graph()
 client = get_client()
+vigencia = load_vigencia()
 
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
@@ -988,7 +1098,7 @@ if prompt := st.chat_input("Escribe tu pregunta, ej: ¿qué protocolo sigo si ha
 
         with st.chat_message("assistant"):
             with st.spinner("Buscando en la base jurídica..."):
-                answer, sources = answer_question(prompt, G, client)
+                answer, sources = answer_question(prompt, G, client, vigencia)
             st.markdown(answer)
             if sources:
                 with st.expander(f"Fuentes ({len(sources)})"):
