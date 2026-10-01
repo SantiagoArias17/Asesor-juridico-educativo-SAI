@@ -19,6 +19,10 @@ GRAPH_PATH = Path(__file__).parent / "graph.json"
 VIGENCIA_PATH = Path(__file__).parent / "vigencia_index.json"
 MODEL = st.secrets.get("ANTHROPIC_MODEL", "claude-sonnet-5")
 MAX_QUESTIONS_PER_SESSION = int(st.secrets.get("MAX_QUESTIONS_PER_SESSION", 30))
+# Turnos previos (pregunta+respuesta) que se reenvían como memoria de la conversación.
+# Cada turno cuenta 2 mensajes (user+assistant), así que 12 = últimos 6 intercambios.
+# Se fuerza a número par: un valor impar rompería la alternación user/assistant que exige la API.
+MAX_HISTORY_MESSAGES = int(st.secrets.get("MAX_HISTORY_MESSAGES", 12)) // 2 * 2
 
 SYSTEM_PROMPT = """# ⚖️ ASESOR JURÍDICO EDUCATIVO ECUADOR
 ## PROMPT MAESTRO — V1.0
@@ -38,11 +42,13 @@ sobre tus capacidades:
   lo que ahí aparece) sobre un grafo de conocimiento construido a partir
   del corpus legal — no es el documento completo palabra por palabra,
   sino los conceptos, normas y relaciones que el grafo extrajo de él.
-- NO tienes memoria de preguntas anteriores de esta conversación al
-  generar cada respuesta nueva: trata cada pregunta como si fuera la
-  primera, y si necesitas un dato del régimen/cargo/institución del
-  usuario para responder con seguridad, pregúntalo en ESTA respuesta en
-  vez de asumir que ya lo sabes de un turno previo.
+- SÍ tienes memoria de los últimos turnos de ESTA conversación (se
+  pierde si la persona recarga la página o empieza una nueva sesión).
+  Úsala: si el usuario ya indicó su régimen/cargo/institución o los
+  hechos de su caso en un turno anterior, no se lo vuelvas a preguntar —
+  continúa el análisis con lo que ya sabes. Si la conversación es muy
+  larga, los turnos más antiguos pueden haberse descartado; si algo
+  parece faltar, confírmalo en vez de asumir.
 - NO existe función para que el usuario adjunte archivos todavía. Si
   describe un documento en texto, trátalo según la Sección 10 (hecho
   indicado por el usuario, no hecho documentado verificado).
@@ -1010,7 +1016,11 @@ def build_vigencia_block(sources: list[str], vigencia: dict) -> str:
 
 
 def answer_question(
-    question: str, G: nx.Graph, client: anthropic.Anthropic, vigencia: dict
+    question: str,
+    G: nx.Graph,
+    client: anthropic.Anthropic,
+    vigencia: dict,
+    history: list[dict] | None = None,
 ) -> tuple[str, list[str]]:
     context = _query_graph_text(
         G, question, mode="bfs", depth=2, token_budget=3500, graph_path=str(GRAPH_PATH)
@@ -1027,6 +1037,25 @@ def answer_question(
     sources = extract_sources(context)
     vigencia_block = build_vigencia_block(sources, vigencia)
 
+    # Turnos previos como memoria: solo texto plano (pregunta/respuesta ya dadas),
+    # nunca su CONTEXTO DEL GRAFO original, para no repetir tokens de grafo en cada turno.
+    past_turns = [
+        {"role": m["role"], "content": m["content"]}
+        for m in (history or [])
+        if m["role"] in ("user", "assistant")
+    ][-MAX_HISTORY_MESSAGES:]
+
+    api_messages = past_turns + [
+        {
+            "role": "user",
+            "content": (
+                f"CONTEXTO DEL GRAFO JURÍDICO (fuentes verificadas):\n{context}"
+                f"{vigencia_block}\n\n"
+                f"PREGUNTA DEL USUARIO:\n{question}"
+            ),
+        }
+    ]
+
     try:
         message = client.messages.create(
             model=MODEL,
@@ -1038,16 +1067,7 @@ def answer_question(
                     "cache_control": {"type": "ephemeral"},
                 }
             ],
-            messages=[
-                {
-                    "role": "user",
-                    "content": (
-                        f"CONTEXTO DEL GRAFO JURÍDICO (fuentes verificadas):\n{context}"
-                        f"{vigencia_block}\n\n"
-                        f"PREGUNTA DEL USUARIO:\n{question}"
-                    ),
-                }
-            ],
+            messages=api_messages,
         )
     except anthropic.AuthenticationError:
         return "⚠️ La clave de API configurada no es válida. Contacta al administrador de este sitio.", []
@@ -1073,6 +1093,16 @@ if "messages" not in st.session_state:
 if "question_count" not in st.session_state:
     st.session_state.question_count = 0
 
+with st.sidebar:
+    st.caption(
+        f"El asistente recuerda los últimos {MAX_HISTORY_MESSAGES // 2} intercambios de "
+        "esta conversación."
+    )
+    if st.button("🗑️ Empezar caso nuevo", use_container_width=True):
+        st.session_state.messages = []
+        st.session_state.question_count = 0
+        st.rerun()
+
 G = load_graph()
 client = get_client()
 vigencia = load_vigencia()
@@ -1092,13 +1122,14 @@ if prompt := st.chat_input("Escribe tu pregunta, ej: ¿qué protocolo sigo si ha
             "Recarga la página para continuar."
         )
     else:
+        history = list(st.session_state.messages)  # turnos previos, antes de agregar este
         st.session_state.messages.append({"role": "user", "content": prompt})
         with st.chat_message("user"):
             st.markdown(prompt)
 
         with st.chat_message("assistant"):
             with st.spinner("Buscando en la base jurídica..."):
-                answer, sources = answer_question(prompt, G, client, vigencia)
+                answer, sources = answer_question(prompt, G, client, vigencia, history)
             st.markdown(answer)
             if sources:
                 with st.expander(f"Fuentes ({len(sources)})"):
