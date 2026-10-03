@@ -63,6 +63,17 @@ sobre tus capacidades:
   correcciones globales de auditoría del corpus (Sección 31) aplican
   siempre, independientemente de qué aparezca en el contexto de esta
   pregunta.
+- Cuando el contexto contenga los PASOS de un protocolo o ruta (situación
+  desencadenante, acciones, actores, fichas, plazos, prohibiciones), tu
+  respuesta debe ser una GUÍA PRÁCTICA ordenada de qué hacer y cómo
+  actuar: pasos numerados en el orden del protocolo, quién hace cada
+  uno, qué ficha o documento se usa, a qué institución se notifica, y
+  las prohibiciones expresas (ej. no mediar entre víctima y agresor).
+  Los plazos solo si aparecen literalmente en el contexto ("inmediatamente"
+  cuenta como plazo; no lo conviertas en horas). Cuando el contexto
+  indique páginas (campo loc=), puedes decir "ver pp. X-Y del protocolo"
+  para que la persona verifique. No te limites a nombrar qué documento
+  aplica: eso solo es un hueco real si el contexto no trae los pasos.
 - NUNCA escribas rutas de archivo, nombres de carpetas, extensiones
   .pdf/.jpg, ni el texto literal "src=" en tu respuesta — son datos
   técnicos internos. Cita cada fuente SOLO por su nombre legible (ej.
@@ -980,6 +991,36 @@ def extract_sources(context_text: str) -> list[str]:
     return sorted({m for m in SOURCE_RE.findall(context_text) if m and m != "None"})
 
 
+NODE_LABEL_RE = re.compile(r"^NODE (.+?) \[src=", re.MULTILINE)
+DETAIL_FIELDS = (
+    ("case_number", "Caso"), ("constitutional_right", "Derecho en juego"),
+    ("description", "Detalle"), ("rationale", "Razonamiento"), ("note", "Nota"),
+    ("date", "Fecha"), ("issuer", "Emisor"),
+)
+
+
+def build_detail_block(context_text: str, G: nx.Graph, max_items: int = 20) -> str:
+    """Texto de detalle (descripción/razonamiento/nº de caso) de los nodos recuperados.
+
+    La consulta al grafo solo imprime etiqueta/fuente; sin esto el asistente no vería
+    el contenido guardado en esos campos (p. ej. la regla de una sentencia).
+    """
+    labels = set(NODE_LABEL_RE.findall(context_text))
+    if not labels:
+        return ""
+    lines = []
+    for _, data in G.nodes(data=True):
+        if data.get("label") in labels:
+            bits = [f"{name}: {str(data[key])[:400]}" for key, name in DETAIL_FIELDS if data.get(key)]
+            if bits:
+                lines.append(f'- "{data["label"][:90]}" -> ' + " | ".join(bits))
+        if len(lines) >= max_items:
+            break
+    if not lines:
+        return ""
+    return "\n\nDETALLE ADICIONAL DE ALGUNOS ELEMENTOS RECUPERADOS:\n" + "\n".join(lines)
+
+
 def build_vigencia_block(sources: list[str], vigencia: dict) -> str:
     """Builds the authoritative vigencia block for the documents actually retrieved this query."""
     if not vigencia or not sources:
@@ -1023,7 +1064,7 @@ def answer_question(
     history: list[dict] | None = None,
 ) -> tuple[str, list[str]]:
     context = _query_graph_text(
-        G, question, mode="bfs", depth=2, token_budget=3500, graph_path=str(GRAPH_PATH)
+        G, question, mode="bfs", depth=2, token_budget=6000, graph_path=str(GRAPH_PATH)
     )
     if not context or not context.strip():
         return (
@@ -1035,7 +1076,7 @@ def answer_question(
         )
 
     sources = extract_sources(context)
-    vigencia_block = build_vigencia_block(sources, vigencia)
+    vigencia_block = build_detail_block(context, G) + build_vigencia_block(sources, vigencia)
 
     # Turnos previos como memoria: solo texto plano (pregunta/respuesta ya dadas),
     # nunca su CONTEXTO DEL GRAFO original, para no repetir tokens de grafo en cada turno.
